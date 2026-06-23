@@ -104,18 +104,43 @@ def comExtDTprocess(df_beta, confileFileName="config.ini"):
             # (1.1) Record the previous triplet buffer into counters
             if sum(triplet) >= 1:
                 Scount += 1
-                if triplet == [True, False, False]: Acount += 1; single_events.append((trigger_time, triplet_energy[0]))
-                if triplet == [False, True, False]:  Bcount += 1; single_events.append((trigger_time, triplet_energy[1]))
-                if triplet == [False, False, True]:  Ccount += 1; single_events.append((trigger_time, triplet_energy[2]))
+                energy_sum = sum(triplet_energy)
+
+                # df_single ("S"): EVERY triggering event, whatever its
+                # multiplicity (single, double or triple-fold). This follows
+                # the standard TDCR convention where nS is the "at least one
+                # channel fired" rate, i.e. nS ⊇ nD ⊇ nT. It is what allows
+                # the out-of-interest sets used downstream (see
+                # outOfInterest()) to be obtained by simple set differences.
+                single_events.append((trigger_time, energy_sum))
+
+                if triplet == [True, False, False]: Acount += 1
+                if triplet == [False, True, False]: Bcount += 1
+                if triplet == [False, False, True]: Ccount += 1
+
                 if sum(triplet) >= 2:
                     Dcount += 1
-                    energy_sum = sum(triplet_energy)
+
+                    # df_double ("D"): every event with at least two channels
+                    # fired, i.e. pure doubles AND triples (a triple
+                    # coincidence is, by construction, also a double
+                    # coincidence on every pair of channels).
                     double_events.append((trigger_time, energy_sum))
-                    if triplet == [True, True, False]:  ABcount += 1
-                    if triplet == [False, True, True]:  BCcount += 1
-                    if triplet == [True, False, True]:  ACcount += 1
-                    if sum(triplet) == 3:
-                        Tcount += 1; ABcount += 1; BCcount += 1; ACcount += 1
+
+                    if sum(triplet) == 2:
+                        # Pure double coincidence (exactly two channels fired)
+                        if triplet == [True, True, False]:  ABcount += 1
+                        if triplet == [False, True, True]:  BCcount += 1
+                        if triplet == [True, False, True]:  ACcount += 1
+                    else:
+                        # Triple coincidence (all three channels fired)
+                        # A triple is simultaneously AB, BC, and AC
+                        ABcount += 1; BCcount += 1; ACcount += 1
+                        Tcount += 1
+
+                        # df_triple ("T"): pure triples only (already the
+                        # maximal multiplicity, so "exactly three" = "at
+                        # least three").
                         triple_events.append((trigger_time, energy_sum))
  
             # (1.1 opt) Intermediate result at end of each run
@@ -193,7 +218,7 @@ def comExtDTprocess(df_beta, confileFileName="config.ini"):
             Drate[i], Trate[i],
             ResolTime * 1e9
         )
-        s[i] = Arate[i] + Brate[i] + Crate[i]   # corrected singles sum
+        s[i] = Srate[i]   # ← fix: was Arate[i]+Brate[i]+Crate[i]
  
     # ── Means and standard deviations ─────────────────────────────────────────
     data_tdcr = {
