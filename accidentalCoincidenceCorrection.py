@@ -115,6 +115,111 @@ def evaluate_listmode_coincidences(t_beta, t_gamma, window_lower, window_upper, 
     return N_gamma, N_c_raw, N_c_acc
 
 
+def _scale_timestamps(t, duration_target, t_start_target):
+    """
+    Linearly rescale a sorted timestamp array so that it spans
+    [t_start_target, t_start_target + duration_target].
+    Used to map background-measurement timestamps into the source time domain
+    before computing cross-mode SESAM spectra.
+    """
+    t = np.asarray(t, dtype=float)
+    if len(t) == 0:
+        return t
+    span = t[-1] - t[0]
+    if span <= 0:
+        return np.full_like(t, t_start_target)
+    return (t - t[0]) / span * duration_target + t_start_target
+
+
+def sesam_cross_correction(
+    t_beta_src, t_gamma_src,
+    t_beta_bkg, t_gamma_bkg,
+    T_dead, duration_src, duration_bkg, coinc_exclusion=0.0
+):
+    """
+    Cross-selective sampling background correction for SESAM.
+    Implements the formula S0 = S1 - S2 - S3 + S4 of H. Liu (ICRM LSC WG, June 2026).
+
+    The four modes are:
+      S1 : all beta  (src + bkg)  ×  all gamma  (src + bkg)   ← standard SESAM on source run
+      S2 : all beta  (src + bkg)  ×  gamma bkg only
+      S3 : beta bkg only           ×  all gamma  (src + bkg)
+      S4 : beta bkg only           ×  gamma bkg only
+
+    S0 = S1 - S2 - S3 + S4 isolates the source-only beta-gamma association.
+
+    For S2 and S3 (mixing timestamps from two separate runs), background timestamps
+    are linearly rescaled to the source time domain so that the SESAM algorithm can
+    search relative-time windows naturally.  S2 and S3 represent uncorrelated channels,
+    so their SESAM spectra are flat (n_g ≈ n_G).  S4 is computed with actual background
+    timestamps (scaled) and may have residual structure from environmental coincidences.
+
+    Formula 1 (neglecting dead-time effects, Haoran slide 13):
+        η_β = 1 − (N_g1 − N_g2 − N_g3 + N_g4) / (N_G1 − N_G2 − N_G3 + N_G4)
+
+    Parameters
+    ----------
+    t_beta_src  : sorted accepted beta timestamps from source run (s)
+    t_gamma_src : sorted gamma ROI timestamps from source run (s)
+    t_beta_bkg  : sorted accepted beta timestamps from background run (s)
+    t_gamma_bkg : sorted gamma ROI timestamps from background run (s)
+    T_dead          : extended dead time (s)
+    duration_src    : source measurement duration (s)
+    duration_bkg    : background measurement duration (s)
+    coinc_exclusion : guard width on each edge of gap and plateau (s)
+
+    Returns
+    -------
+    dict with eps_beta_corr, u_eps_beta_corr, N_g0, N_G0,
+         and the per-mode S1-S4 dicts for diagnostics
+    """
+    t_src_start = float(t_beta_src[0]) if len(t_beta_src) else 0.0
+
+    # ── S1: source β × source γ  (standard SESAM) ────────────────────────────
+    s1 = sesam_process(t_beta_src, t_gamma_src, T_dead, duration_src, coinc_exclusion)
+
+    # ── Scale background timestamps into the source time domain ───────────────
+    t_gamma_bkg_sc = _scale_timestamps(t_gamma_bkg, duration_src, t_src_start)
+    t_beta_bkg_sc  = _scale_timestamps(t_beta_bkg,  duration_src, t_src_start)
+
+    # ── S2: source β × background γ (expect flat: n_g2 ≈ n_G2) ──────────────
+    s2 = sesam_process(t_beta_src,   t_gamma_bkg_sc, T_dead, duration_src, coinc_exclusion)
+
+    # ── S3: background β × source γ (expect flat: n_g3 ≈ n_G3) ──────────────
+    s3 = sesam_process(t_beta_bkg_sc, t_gamma_src,   T_dead, duration_src, coinc_exclusion)
+
+    # ── S4: background β × background γ (residual background coincidences) ───
+    s4 = sesam_process(t_beta_bkg_sc, t_gamma_bkg_sc, T_dead, duration_src, coinc_exclusion)
+
+    # ── Cross-selective sampling formula ──────────────────────────────────────
+    N_g0 = s1['N_g'] - s2['N_g'] - s3['N_g'] + s4['N_g']
+    N_G0 = s1['N_G'] - s2['N_G'] - s3['N_G'] + s4['N_G']
+
+    print(f"    SESAM cross-correction: N_g0={N_g0:.1f}  N_G0={N_G0:.1f}")
+    print(f"      S1 N_g/N_G = {s1['N_g']}/{s1['N_G']},  "
+          f"S2 {s2['N_g']}/{s2['N_G']},  "
+          f"S3 {s3['N_g']}/{s3['N_G']},  "
+          f"S4 {s4['N_g']}/{s4['N_G']}")
+
+    if N_G0 > 0 and N_g0 >= 0:
+        eps_corr   = max(0.0, 1.0 - N_g0 / N_G0)
+        u_eps_corr = eps_corr * np.sqrt(
+            max(N_g0, 1) / N_g0**2 + 1.0 / max(N_G0, 1)
+        ) if N_g0 > 0 else 0.0
+    else:
+        eps_corr   = s1['eps_beta']
+        u_eps_corr = s1['u_eps_beta']
+        print("    WARNING: cross-correction denominator ≤ 0, falling back to S1.")
+
+    return {
+        "eps_beta":   eps_corr,
+        "u_eps_beta": u_eps_corr,
+        "N_g0": N_g0,
+        "N_G0": N_G0,
+        "S1": s1, "S2": s2, "S3": s3, "S4": s4,
+    }
+
+
 def sesam_process(t_beta_accepted, t_gamma_roi, T_dead, duration,
                   coinc_exclusion=0.0):
     """

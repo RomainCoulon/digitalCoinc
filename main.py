@@ -46,6 +46,11 @@ coinc_wind_tdcr = float(config["settings"]["coinc_wind_tdcr"])
 if bg_active: df_A, df_B, df_C, df_G = rlm.readSeparateCSV(confileFileName="config.ini", bg_active=bg_active)
 else: df_A, df_B, df_C = rlm.readSeparateCSV(confileFileName="config.ini", bg_active=bg_active)
 
+use_bkg_correction = config["settings"].getboolean("use_bkg_correction", fallback=False)
+if bg_active and use_bkg_correction:
+    print("\nLoading background measurement files...")
+    df_A_bck, df_B_bck, df_C_bck, df_G_bck = rlm.readSeparateCSV_bkg(confileFileName="config.ini")
+
 print("spectrum analysis...")
 
 sp.energySpectrum(df_A, bins=2**12, label="CH0 beta A")
@@ -160,6 +165,24 @@ if bg_active:
 
     sesam_eps_D, sesam_act_D, sesam_u_act_D = [], [], []
     sesam_eps_T, sesam_act_T, sesam_u_act_T = [], [], []
+    # Background-corrected SESAM (cross-selective sampling)
+    sesam_corr_eps_D, sesam_corr_act_D, sesam_corr_u_act_D = [], [], []
+    sesam_corr_eps_T, sesam_corr_act_T, sesam_corr_u_act_T = [], [], []
+
+    # --- Background data processing for cross-selective sampling ---
+    if use_bkg_correction:
+        print("\nProcessing background data through TDCR pipeline...")
+        df_beta_bck = tdsm.mergeBeta(df_A_bck, df_B_bck, df_C_bck)
+        _, df_beta_S_bck, df_beta_D_bck, df_beta_T_bck = tdsm.comExtDTprocess(df_beta_bck)
+        # Apply the same delay correction to background gamma
+        df_G_bck['TIMETAG'] = df_G_bck['TIMETAG'] + meanDelay * 1e-9
+        # Filter background gamma to energy ROI
+        df_G_bck_ROI = df_G_bck[
+            (df_G_bck["ENERGY"] >= lowerBoundGamma) & (df_G_bck["ENERGY"] <= upperBoundGamma)]
+        t_gamma_bck = df_G_bck_ROI["TIMETAG"].values
+        duration_bck = df_G_bck["TIMETAG"].iloc[-1] - df_G_bck["TIMETAG"].iloc[0]
+        print(f"  Background duration       = {duration_bck:.1f} s")
+        print(f"  Background gamma ROI events = {len(t_gamma_bck)}")
 
     # --- Correlation counting setup (Lewis et al. 1973) ---
     T_interval_corr = float(config["settings"]["corr_interval_length"]) * 1e-3  # ms → s
@@ -266,6 +289,40 @@ if bg_active:
         print(f"  SESAM N_g / N_G        (T) = {sesam_res_T['N_g']} / {sesam_res_T['N_G']}")
         print(f"  SESAM efficiency ε_β   (T) = {sesam_res_T['eps_beta']:.6f} +/- {sesam_res_T['u_eps_beta']:.6f}")
         print(f"  SESAM activity N₀      (T) = {sesam_res_T['Activity']:.4f} +/- {sesam_res_T['u_Activity']:.4f} Bq")
+
+        # ---------------------------------------------------------
+        # C2. SESAM CROSS-SELECTIVE SAMPLING BACKGROUND CORRECTION
+        # ---------------------------------------------------------
+        if use_bkg_correction:
+            t_beta_D_bck_thresh = df_beta_D_bck[df_beta_D_bck['ENERGY'] > thres_i]["TIMETAG"].values
+            t_beta_T_bck_thresh = df_beta_T_bck[df_beta_T_bck['ENERGY'] > thres_i]["TIMETAG"].values
+
+            print(f"\n  --- SESAM cross-correction (D), threshold={thres_i} ---")
+            cross_D = acc.sesam_cross_correction(
+                t_beta_D, t_gamma, t_beta_D_bck_thresh, t_gamma_bck,
+                T_dead_sesam, duration, duration_bck, coinc_exclusion_sesam)
+            print(f"\n  --- SESAM cross-correction (T), threshold={thres_i} ---")
+            cross_T = acc.sesam_cross_correction(
+                t_beta_T, t_gamma, t_beta_T_bck_thresh, t_gamma_bck,
+                T_dead_sesam, duration, duration_bck, coinc_exclusion_sesam)
+
+            # Compute corrected activity using corrected efficiency
+            eps_D_c = cross_D["eps_beta"]
+            R_beta_D = len(t_beta_D) / duration
+            act_D_c  = R_beta_D / eps_D_c if eps_D_c > 0 else 0.0
+            u_act_D_c = act_D_c * np.sqrt(
+                (cross_D["u_eps_beta"] / eps_D_c)**2 + 1.0/max(len(t_beta_D), 1)) if eps_D_c > 0 else 0.0
+
+            eps_T_c = cross_T["eps_beta"]
+            R_beta_T = len(t_beta_T) / duration
+            act_T_c  = R_beta_T / eps_T_c if eps_T_c > 0 else 0.0
+            u_act_T_c = act_T_c * np.sqrt(
+                (cross_T["u_eps_beta"] / eps_T_c)**2 + 1.0/max(len(t_beta_T), 1)) if eps_T_c > 0 else 0.0
+
+            sesam_corr_eps_D.append(eps_D_c);  sesam_corr_act_D.append(act_D_c);  sesam_corr_u_act_D.append(u_act_D_c)
+            sesam_corr_eps_T.append(eps_T_c);  sesam_corr_act_T.append(act_T_c);  sesam_corr_u_act_T.append(u_act_T_c)
+            print(f"  SESAM(cross) ε_β (D) = {eps_D_c:.6f}  N₀ = {act_D_c:.4f} +/- {u_act_D_c:.4f} Bq")
+            print(f"  SESAM(cross) ε_β (T) = {eps_T_c:.6f}  N₀ = {act_T_c:.4f} +/- {u_act_T_c:.4f} Bq")
 
         # ---------------------------------------------------------
         # D. CORRELATION COUNTING  (Lewis et al. 1973)
@@ -508,6 +565,55 @@ if bg_active:
             plt.show()
 
     # =========================================================================
+    # SESAM CROSS-CORRECTION EXTRAPOLATION
+    # =========================================================================
+    if use_bkg_correction and sesam_corr_eps_D:
+        print("\n**************************************")
+        print("RESULTS FROM SESAM (CROSS-SELECTIVE SAMPLING, background corrected)")
+        print("**************************************")
+
+        eps_cc_D = np.array(sesam_corr_eps_D);  y_cc_D = np.array(sesam_corr_act_D);  u_cc_D = np.array(sesam_corr_u_act_D)
+        eps_cc_T = np.array(sesam_corr_eps_T);  y_cc_T = np.array(sesam_corr_act_T);  u_cc_T = np.array(sesam_corr_u_act_T)
+
+        x1_cc_D = 1.0 - eps_cc_D;  x2_cc_D = x1_cc_D / eps_cc_D
+        x1_cc_T = 1.0 - eps_cc_T;  x2_cc_T = x1_cc_T / eps_cc_T
+
+        A_cc_x1_lin_D, uA_cc_x1_lin_D, A_cc_x1_poly_D, uA_cc_x1_poly_D, cl_cc1_D, cp_cc1_D = _sesam_fit(x1_cc_D, y_cc_D)
+        A_cc_x2_lin_D, uA_cc_x2_lin_D, A_cc_x2_poly_D, uA_cc_x2_poly_D, cl_cc2_D, cp_cc2_D = _sesam_fit(x2_cc_D, y_cc_D)
+        A_cc_x1_lin_T, uA_cc_x1_lin_T, A_cc_x1_poly_T, uA_cc_x1_poly_T, cl_cc1_T, cp_cc1_T = _sesam_fit(x1_cc_T, y_cc_T)
+        A_cc_x2_lin_T, uA_cc_x2_lin_T, A_cc_x2_poly_T, uA_cc_x2_poly_T, cl_cc2_T, cp_cc2_T = _sesam_fit(x2_cc_T, y_cc_T)
+
+        print(f"\nActivity (double, lin fit,  1 - eps) = {A_cc_x1_lin_D:.4f} +/- {uA_cc_x1_lin_D:.4f} Bq")
+        print(f"Activity (double, poly fit, 1 - eps) = {A_cc_x1_poly_D:.4f} +/- {uA_cc_x1_poly_D:.4f} Bq")
+        print(f"Activity (double, lin fit,  (1-eps)/eps) = {A_cc_x2_lin_D:.4f} +/- {uA_cc_x2_lin_D:.4f} Bq")
+        print(f"Activity (double, poly fit, (1-eps)/eps) = {A_cc_x2_poly_D:.4f} +/- {uA_cc_x2_poly_D:.4f} Bq")
+        print(f"Activity (triple, lin fit,  1 - eps) = {A_cc_x1_lin_T:.4f} +/- {uA_cc_x1_lin_T:.4f} Bq")
+        print(f"Activity (triple, poly fit, 1 - eps) = {A_cc_x1_poly_T:.4f} +/- {uA_cc_x1_poly_T:.4f} Bq")
+        print(f"Activity (triple, lin fit,  (1-eps)/eps) = {A_cc_x2_lin_T:.4f} +/- {uA_cc_x2_lin_T:.4f} Bq")
+        print(f"Activity (triple, poly fit, (1-eps)/eps) = {A_cc_x2_poly_T:.4f} +/- {uA_cc_x2_poly_T:.4f} Bq")
+
+        for x1, x2, y_s, u_s, cl1, cp1, a1l, ua1l, a1p, cl2, cp2, a2l, ua2l, a2p, tag in [
+            (x1_cc_D, x2_cc_D, y_cc_D, u_cc_D, cl_cc1_D, cp_cc1_D, A_cc_x1_lin_D, uA_cc_x1_lin_D, A_cc_x1_poly_D,
+             cl_cc2_D, cp_cc2_D, A_cc_x2_lin_D, uA_cc_x2_lin_D, A_cc_x2_poly_D, "double"),
+            (x1_cc_T, x2_cc_T, y_cc_T, u_cc_T, cl_cc1_T, cp_cc1_T, A_cc_x1_lin_T, uA_cc_x1_lin_T, A_cc_x1_poly_T,
+             cl_cc2_T, cp_cc2_T, A_cc_x2_lin_T, uA_cc_x2_lin_T, A_cc_x2_poly_T, "triple"),
+        ]:
+            for x, cl, cp, a_lin, ua_lin, a_poly, x_lbl in [
+                (x1, cl1, cp1, a1l, ua1l, a1p, r"$1-\varepsilon_\beta$"),
+                (x2, cl2, cp2, a2l, ua2l, a2p, r"$(1-\varepsilon_\beta)/\varepsilon_\beta$"),
+            ]:
+                x_fit = np.linspace(0, x.max() * 1.1, 200)
+                fig, ax = plt.subplots(figsize=(8, 5))
+                ax.errorbar(x, y_s, yerr=u_s, fmt='o', capsize=3, label='data (bkg corrected)')
+                ax.plot(x_fit, np.polyval(cl, x_fit), '--', label=f'linear: A₀={a_lin:.2f} ± {ua_lin:.2f} Bq')
+                ax.plot(x_fit, np.polyval(cp, x_fit), ':', label=f'poly2:  A₀={a_poly:.2f} Bq')
+                ax.axvline(0, color='grey', linestyle=':', linewidth=0.8)
+                ax.set_xlabel(x_lbl)
+                ax.set_ylabel('Activity (Bq)')
+                ax.set_title(f'SESAM cross-correction — {tag} coincidences')
+                ax.legend(); ax.grid(True, alpha=0.3); plt.tight_layout(); plt.show()
+
+    # =========================================================================
     # CORRELATION COUNTING EXTRAPOLATION  (Lewis et al. 1973)
     # =========================================================================
     print("\n**************************************")
@@ -628,4 +734,13 @@ if bg_active:
     _row("  poly, 1 - eps_beta",          A_cx1_poly_D, uA_cx1_poly_D, A_cx1_poly_T, uA_cx1_poly_T)
     _row("  lin,  (1-eps_beta)/eps_beta", A_cx2_lin_D,  uA_cx2_lin_D,  A_cx2_lin_T,  uA_cx2_lin_T)
     _row("  poly, (1-eps_beta)/eps_beta", A_cx2_poly_D, uA_cx2_poly_D, A_cx2_poly_T, uA_cx2_poly_T)
+
+    if use_bkg_correction and sesam_corr_eps_D:
+        print("-" * W)
+        print("  SESAM cross-corr. S0=S1-S2-S3+S4 (Haoran 2026):")
+        _row("  lin,  1 - eps_beta",          A_cc_x1_lin_D,  uA_cc_x1_lin_D,  A_cc_x1_lin_T,  uA_cc_x1_lin_T)
+        _row("  poly, 1 - eps_beta",          A_cc_x1_poly_D, uA_cc_x1_poly_D, A_cc_x1_poly_T, uA_cc_x1_poly_T)
+        _row("  lin,  (1-eps_beta)/eps_beta", A_cc_x2_lin_D,  uA_cc_x2_lin_D,  A_cc_x2_lin_T,  uA_cc_x2_lin_T)
+        _row("  poly, (1-eps_beta)/eps_beta", A_cc_x2_poly_D, uA_cc_x2_poly_D, A_cc_x2_poly_T, uA_cc_x2_poly_T)
+
     print("=" * W)

@@ -39,3 +39,33 @@ def readSeparateCSV(confileFileName="config.ini", bg_active=True):
  
     if bg_active: return df_A, df_B, df_C, df_G
     else: return df_A, df_B, df_C
+
+
+def readSeparateCSV_bkg(confileFileName="config.ini"):
+    """
+    Load background measurement files defined by data_path_*_bck keys in config.ini.
+
+    Returns
+    -------
+    df_A_bck, df_B_bck, df_C_bck, df_G_bck : DataFrames with TIMETAG (s) and ENERGY
+    """
+    config = configparser.ConfigParser()
+    config.read(confileFileName)
+
+    def load(path):
+        df = pd.read_csv(path, sep=";", usecols=["TIMETAG", "ENERGY"])
+        df["TIMETAG"] = df["TIMETAG"].astype("float64") * 1e-12
+        return df
+
+    df_A_bck = load(config["paths"]["data_path_A_bck"])
+    df_B_bck = load(config["paths"]["data_path_B_bck"])
+    df_C_bck = load(config["paths"]["data_path_C_bck"])
+    df_G_bck = load(config["paths"]["data_path_G_bck"])
+
+    print("Loaded background data shapes:")
+    print(f"  CH0 (A_bck): {df_A_bck.shape}")
+    print(f"  CH1 (B_bck): {df_B_bck.shape}")
+    print(f"  CH2 (C_bck): {df_C_bck.shape}")
+    print(f"  CH3 (G_bck): {df_G_bck.shape}")
+
+    return df_A_bck, df_B_bck, df_C_bck, df_G_bck
