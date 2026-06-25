@@ -55,19 +55,22 @@ if bg_active:
     sp.energySpectrum(df_G, bins=2**12, label="CH3 NaI gamma", Bounds=[lowerBoundGamma, upperBoundGamma])
 
     print("\nauto-detecting delay bounds from β(A)–γ time-difference spectrum...")
-    lowerDelayBound, upperDelayBound, _ = sp.autoDetectDelayBounds(
+    auto_delay_n_sigma = float(config["settings"]["auto_delay_n_sigma"])
+    lowerDelayBound, upperDelayBound, meanDelay = sp.autoDetectDelayBounds(
         df_A, df_G,
         window=3e-6, bin_width=2e-9,
         energyBoundsG=[lowerBoundGamma, upperBoundGamma],
+        n_sigma=auto_delay_n_sigma,
         label="β(A)–γ"
     )
+    # meanDelay is the median of events inside [lowerDelayBound, upperDelayBound] —
+    # more robust than (upper+lower)/2 when the peak has an asymmetric tail.
 
     sp.timeDiffSpectrum(df_A, df_G, Bounds=[lowerDelayBound, upperDelayBound], window=3e-6, bin_width=2e-9, label="β(A)–γ", energyBoundsG=[lowerBoundGamma, upperBoundGamma])
     sp.timeDiffSpectrum(df_B, df_G, Bounds=[lowerDelayBound, upperDelayBound], window=3e-6, bin_width=2e-9, label="β(B)–γ", energyBoundsG=[lowerBoundGamma, upperBoundGamma])
     sp.timeDiffSpectrum(df_C, df_G, Bounds=[lowerDelayBound, upperDelayBound], window=3e-6, bin_width=2e-9, label="β(C)–γ", energyBoundsG=[lowerBoundGamma, upperBoundGamma])
 
 
-    meanDelay = (upperDelayBound + lowerDelayBound) / 2
     bg_window = np.abs(upperDelayBound - lowerDelayBound)
 
     print(f"\nmean delay time of the gamma channel = {meanDelay} ns")
@@ -150,7 +153,25 @@ if bg_active:
     # Initialize lists to store anti-coincidence extrapolation data
     anti_eps_D, anti_act_D = [], []
     anti_eps_T, anti_act_T = [], []
-    
+
+    # --- SESAM setup ---
+    T_dead_sesam          = com_ext_deadTime_tdcr * 1e-9          # s
+    coinc_exclusion_sesam = float(config["settings"]["sesam_coinc_exclusion"]) * 1e-9  # ns → s
+
+    sesam_eps_D, sesam_act_D, sesam_u_act_D = [], [], []
+    sesam_eps_T, sesam_act_T, sesam_u_act_T = [], [], []
+
+    print(f"\nSESAM: T_dead = {T_dead_sesam*1e6:.0f} µs, "
+          f"guard = {coinc_exclusion_sesam*1e9:.0f} ns each side, "
+          f"zone width = {(T_dead_sesam - 2*coinc_exclusion_sesam)*1e6:.4f} µs")
+
+    print("\n--- SESAM spectrum (double coincidences, threshold = 0) ---")
+    sp.sesam_spectrum(
+        df_beta_D["TIMETAG"].values, t_gamma,
+        T_dead=T_dead_sesam, bin_width=500e-9,
+        coinc_exclusion=coinc_exclusion_sesam, label="double β"
+    )
+
     threshold_beta_vector = [0, 500, 1000, 2000, 3000]
     
     bg_vec_D, bg_vec_T = [], []
@@ -215,7 +236,30 @@ if bg_active:
         anti_res_T = acc.process_anticoincidence_activity(len(t_beta_T), N_g_T, N_raw_T, N_acc_T, duration)
         anti_eps_T.append(anti_res_T["efficiency_beta"])
         anti_act_T.append(anti_res_T["Activity_N0"])
-    
+
+        # ---------------------------------------------------------
+        # C. SESAM (Selective Sampling — Müller 1981)
+        # ---------------------------------------------------------
+        sesam_res_D = acc.sesam_process(
+            t_beta_D, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
+        sesam_res_T = acc.sesam_process(
+            t_beta_T, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
+
+        sesam_eps_D.append(sesam_res_D["eps_beta"])
+        sesam_act_D.append(sesam_res_D["Activity"])
+        sesam_u_act_D.append(sesam_res_D["u_Activity"])
+
+        sesam_eps_T.append(sesam_res_T["eps_beta"])
+        sesam_act_T.append(sesam_res_T["Activity"])
+        sesam_u_act_T.append(sesam_res_T["u_Activity"])
+
+        print(f"  SESAM N_g / N_G        (D) = {sesam_res_D['N_g']} / {sesam_res_D['N_G']}")
+        print(f"  SESAM efficiency ε_β   (D) = {sesam_res_D['eps_beta']:.6f} +/- {sesam_res_D['u_eps_beta']:.6f}")
+        print(f"  SESAM activity N₀      (D) = {sesam_res_D['Activity']:.4f} +/- {sesam_res_D['u_Activity']:.4f} Bq")
+        print(f"  SESAM N_g / N_G        (T) = {sesam_res_T['N_g']} / {sesam_res_T['N_G']}")
+        print(f"  SESAM efficiency ε_β   (T) = {sesam_res_T['eps_beta']:.6f} +/- {sesam_res_T['u_eps_beta']:.6f}")
+        print(f"  SESAM activity N₀      (T) = {sesam_res_T['Activity']:.4f} +/- {sesam_res_T['u_Activity']:.4f} Bq")
+
     print("**********************************")
     print("activity extrapolation analysis...")
     print("**********************************")
@@ -360,3 +404,74 @@ if bg_active:
     
     print(f"\nActivity (triple, lin fit, (1 - epsilon_beta)/epsilon_beta) = {fit_anti_lin_T[-1]:.2f} Bq")
     print(f"Activity (triple, poly fit, (1 - epsilon_beta)/epsilon_beta) = {fit_anti_poly_T[-1]:.2f} Bq")
+
+    # --- SESAM post-loop extrapolation ---
+    # Same two x-axes as the B-G coincidence activity_extrapolation function:
+    #   x1 = 1 - ε_β              (classical Campion beta inefficiency)
+    #   x2 = (1 - ε_β) / ε_β     (ratio form)
+    print("\n**************************************")
+    print("RESULTS FROM SESAM (SELECTIVE SAMPLING)")
+    print("**************************************")
+
+    eps_D = np.array(sesam_eps_D)
+    eps_T = np.array(sesam_eps_T)
+    y_sesam_D = np.array(sesam_act_D)
+    y_sesam_T = np.array(sesam_act_T)
+    u_sesam_D = np.array(sesam_u_act_D)
+    u_sesam_T = np.array(sesam_u_act_T)
+
+    x1_D = 1.0 - eps_D
+    x2_D = x1_D / eps_D
+    x1_T = 1.0 - eps_T
+    x2_T = x1_T / eps_T
+
+    def _sesam_fit(x, y):
+        c_lin,  cov_lin  = np.polyfit(x, y, 1, cov=True)
+        c_poly, cov_poly = np.polyfit(x, y, 2, cov=True)
+        return (c_lin[-1],  np.sqrt(cov_lin[-1, -1]),
+                c_poly[-1], np.sqrt(cov_poly[-1, -1]),
+                c_lin, c_poly)
+
+    A_x1_lin_D, uA_x1_lin_D, A_x1_poly_D, uA_x1_poly_D, cl_x1_D, cp_x1_D = _sesam_fit(x1_D, y_sesam_D)
+    A_x2_lin_D, uA_x2_lin_D, A_x2_poly_D, uA_x2_poly_D, cl_x2_D, cp_x2_D = _sesam_fit(x2_D, y_sesam_D)
+    A_x1_lin_T, uA_x1_lin_T, A_x1_poly_T, uA_x1_poly_T, cl_x1_T, cp_x1_T = _sesam_fit(x1_T, y_sesam_T)
+    A_x2_lin_T, uA_x2_lin_T, A_x2_poly_T, uA_x2_poly_T, cl_x2_T, cp_x2_T = _sesam_fit(x2_T, y_sesam_T)
+
+    print(f"\nActivity (double, lin fit,  1 - epsilon_beta)                  = {A_x1_lin_D:.4f} +/- {uA_x1_lin_D:.4f} Bq")
+    print(f"Activity (double, poly fit, 1 - epsilon_beta)                  = {A_x1_poly_D:.4f} +/- {uA_x1_poly_D:.4f} Bq")
+    print(f"Activity (double, lin fit,  (1 - epsilon_beta)/epsilon_beta)   = {A_x2_lin_D:.4f} +/- {uA_x2_lin_D:.4f} Bq")
+    print(f"Activity (double, poly fit, (1 - epsilon_beta)/epsilon_beta)   = {A_x2_poly_D:.4f} +/- {uA_x2_poly_D:.4f} Bq")
+    print(f"Activity (triple, lin fit,  1 - epsilon_beta)                  = {A_x1_lin_T:.4f} +/- {uA_x1_lin_T:.4f} Bq")
+    print(f"Activity (triple, poly fit, 1 - epsilon_beta)                  = {A_x1_poly_T:.4f} +/- {uA_x1_poly_T:.4f} Bq")
+    print(f"Activity (triple, lin fit,  (1 - epsilon_beta)/epsilon_beta)   = {A_x2_lin_T:.4f} +/- {uA_x2_lin_T:.4f} Bq")
+    print(f"Activity (triple, poly fit, (1 - epsilon_beta)/epsilon_beta)   = {A_x2_poly_T:.4f} +/- {uA_x2_poly_T:.4f} Bq")
+
+    for (x1, x2, y_s, u_s,
+         cl1, cp1, a1_lin, ua1_lin, a1_poly,
+         cl2, cp2, a2_lin, ua2_lin, a2_poly, tag) in [
+        (x1_D, x2_D, y_sesam_D, u_sesam_D,
+         cl_x1_D, cp_x1_D, A_x1_lin_D, uA_x1_lin_D, A_x1_poly_D,
+         cl_x2_D, cp_x2_D, A_x2_lin_D, uA_x2_lin_D, A_x2_poly_D, "double"),
+        (x1_T, x2_T, y_sesam_T, u_sesam_T,
+         cl_x1_T, cp_x1_T, A_x1_lin_T, uA_x1_lin_T, A_x1_poly_T,
+         cl_x2_T, cp_x2_T, A_x2_lin_T, uA_x2_lin_T, A_x2_poly_T, "triple"),
+    ]:
+        for x, cl, cp, a_lin, ua_lin, a_poly, x_lbl in [
+            (x1, cl1, cp1, a1_lin, ua1_lin, a1_poly, r"$1 - \varepsilon_\beta$"),
+            (x2, cl2, cp2, a2_lin, ua2_lin, a2_poly, r"$(1 - \varepsilon_\beta)/\varepsilon_\beta$"),
+        ]:
+            x_fit = np.linspace(0, x.max() * 1.1, 200)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.errorbar(x, y_s, yerr=u_s, fmt='o', capsize=3, label='data')
+            ax.plot(x_fit, np.polyval(cl, x_fit), '--',
+                    label=f'linear:  A₀ = {a_lin:.2f} ± {ua_lin:.2f} Bq')
+            ax.plot(x_fit, np.polyval(cp, x_fit), ':',
+                    label=f'poly2:   A₀ = {a_poly:.2f} Bq')
+            ax.axvline(0, color='grey', linestyle=':', linewidth=0.8)
+            ax.set_xlabel(x_lbl)
+            ax.set_ylabel('Activity (Bq)')
+            ax.set_title(f'SESAM extrapolation — {tag} coincidences')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.show()

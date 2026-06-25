@@ -115,6 +115,89 @@ def evaluate_listmode_coincidences(t_beta, t_gamma, window_lower, window_upper, 
     return N_gamma, N_c_raw, N_c_acc
 
 
+def sesam_process(t_beta_accepted, t_gamma_roi, T_dead, duration,
+                  coinc_exclusion=0.0):
+    """
+    Digital Selective Sampling (SESAM) — Müller 1981 / Haoran list-mode implementation.
+
+    A guard of width coinc_exclusion is removed symmetrically from BOTH edges of
+    the gap g AND from BOTH edges of the plateau G, so both zones have identical
+    effective widths.  The ratio N_g / N_G then directly equals (1 − ε_β) with no
+    additional width normalisation.
+
+    Zone layout relative to each accepted beta t₀:
+
+      Upper guard (coinc. peak)  :  [t₀ − exc,          t₀)
+      Gap g                      :  [t₀ − T + exc,       t₀ − exc)   width W = T − 2·exc
+      Dead-time boundary guard   :  [t₀ − T − exc,       t₀ − T + exc)
+      Plateau G                  :  [t₀ − 2T + exc,      t₀ − T − exc)   width W = T − 2·exc
+      (Lower guard of G omitted — far from any artefact)
+
+    ε_β = 1 − N_g / N_G          (valid because both zones have the same width W)
+    N₀  = ρ_β / ε_β              where ρ_β = N_beta / duration
+
+    Parameters
+    ----------
+    t_beta_accepted : sorted 1-D array of beta timestamps already through DT (s)
+    t_gamma_roi     : sorted 1-D array of gamma timestamps in energy ROI (s)
+    T_dead          : extended dead time applied to the beta channel (s)
+    duration        : measurement duration (s)
+    coinc_exclusion : guard width removed from each edge of g and G (s);
+                      should be ≥ coincidence half-window after delay correction
+
+    Returns
+    -------
+    dict : N_g, N_G, zone_W, eps_beta, u_eps_beta, Activity, u_Activity, R_beta
+    """
+    exc  = coinc_exclusion
+    zone_W = T_dead - 2.0 * exc      # effective width of both g and G
+
+    t0 = np.asarray(t_beta_accepted)
+    tg = np.asarray(t_gamma_roi)
+
+    # Gap g: [t0 - T + exc,  t0 - exc)
+    hi_g = np.searchsorted(tg, t0 - exc,          side='left')
+    lo_g = np.searchsorted(tg, t0 - T_dead + exc, side='left')
+    N_g  = int((hi_g - lo_g).sum())
+
+    # Plateau G: [t0 - 2T + exc,  t0 - T - exc)
+    hi_G = np.searchsorted(tg, t0 - T_dead - exc,         side='left')
+    lo_G = np.searchsorted(tg, t0 - 2.0 * T_dead + exc,   side='left')
+    N_G  = int((hi_G - lo_G).sum())
+
+    N_beta = len(t0)
+    R_beta = N_beta / duration
+
+    # Both zones have the same width → no normalisation needed
+    if N_G > 0 and zone_W > 0:
+        ratio   = N_g / N_G
+        u_ratio = ratio * np.sqrt(1.0 / max(N_g, 1) + 1.0 / N_G)
+    else:
+        ratio, u_ratio = 1.0, 0.0
+
+    eps_beta   = max(0.0, 1.0 - ratio)
+    u_eps_beta = u_ratio
+
+    if eps_beta > 0:
+        Activity   = R_beta / eps_beta
+        u_Activity = Activity * np.sqrt((u_eps_beta / eps_beta) ** 2 + 1.0 / max(N_beta, 1))
+    else:
+        Activity = u_Activity = 0.0
+
+    return {
+        "N_g":        N_g,
+        "N_G":        N_G,
+        "zone_W":     zone_W,
+        "N_beta":     N_beta,
+        "ratio_g_G":  ratio,
+        "eps_beta":   eps_beta,
+        "u_eps_beta": u_eps_beta,
+        "Activity":   Activity,
+        "u_Activity": u_Activity,
+        "R_beta":     R_beta,
+    }
+
+
 def process_anticoincidence_activity(N_beta, N_gamma, N_c_raw, N_c_acc, duration):
     """
     Evaluates activity using the Anticoincidence method and Shift-correction.

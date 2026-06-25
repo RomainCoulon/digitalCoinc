@@ -117,6 +117,89 @@ def timeDiffSpectrum(dfB, dfG, Bounds=None, window=1e-6, bin_width=1e-9, label="
     return counts, edges
 
 
+def sesam_spectrum(t_beta_accepted, t_gamma_roi, T_dead, bin_width=500e-9,
+                   coinc_exclusion=0.0, label=""):
+    """
+    Plot the SESAM time-difference spectrum (Müller 1981 Fig. 2) with symmetric guards.
+
+    Zone layout (relative to each accepted beta t₀, displayed in µs):
+
+      [−2T+exc, −T−exc]  → Plateau G  (blue)   — all gammas, same width as g
+      [−T−exc,  −T+exc]  → Guard      (red)     — dead-time boundary exclusion
+      [−T+exc,  −exc]    → Gap g      (orange)  — only unpaired gammas
+      [−exc,    0]       → Guard      (red)     — coincidence peak exclusion
+
+    Parameters
+    ----------
+    t_beta_accepted : sorted array of accepted beta timestamps (s)
+    t_gamma_roi     : sorted array of gamma timestamps in energy ROI (s)
+    T_dead          : extended dead time (s)
+    bin_width       : histogram bin width in seconds (default 500 ns)
+    coinc_exclusion : guard width on each edge of g and G (s)
+    label           : plot title suffix
+    """
+    exc       = coinc_exclusion
+    search_lo = -(2.0 * T_dead + exc)   # show full G zone plus a margin
+    search_hi =  0.3 * T_dead
+
+    dt_list = []
+    tg = np.asarray(t_gamma_roi)
+    for t0 in t_beta_accepted:
+        lo = np.searchsorted(tg, t0 + search_lo, side='left')
+        hi = np.searchsorted(tg, t0 + search_hi, side='right')
+        if hi > lo:
+            dt_list.append(tg[lo:hi] - t0)
+
+    if not dt_list:
+        print("sesam_spectrum: no gamma events found in the SESAM window.")
+        return None, None
+
+    dt_us = np.concatenate(dt_list) * 1e6
+
+    bw_us = bin_width * 1e6
+    bins  = np.arange(search_lo * 1e6, search_hi * 1e6 + bw_us, bw_us)
+    counts, edges = np.histogram(dt_us, bins=bins)
+    centers = (edges[:-1] + edges[1:]) / 2
+
+    T_us   = T_dead * 1e6
+    exc_us = exc * 1e6
+    W_us   = T_us - 2.0 * exc_us     # effective zone width in µs
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.step(centers, counts, where='mid', linewidth=0.8, color='steelblue')
+
+    # Plateau G
+    ax.axvspan(-2*T_us + exc_us, -T_us - exc_us, alpha=0.15, color='blue',
+               label=f'Plateau G  (W = {W_us*1e3:.0f} ns)')
+    # Dead-time boundary guard
+    ax.axvspan(-T_us - exc_us, -T_us + exc_us, alpha=0.30, color='red',
+               label=f'Guard ±{exc_us*1e3:.0f} ns (DT boundary)')
+    # Gap g
+    ax.axvspan(-T_us + exc_us, -exc_us, alpha=0.15, color='orange',
+               label=f'Gap g  (W = {W_us*1e3:.0f} ns)')
+    # Coincidence peak guard
+    ax.axvspan(-exc_us, 0, alpha=0.30, color='red',
+               label=f'Guard ±{exc_us*1e3:.0f} ns (coinc. peak)')
+
+    for x, c, ls in [(-2*T_us+exc_us, 'blue',   ':'),
+                     (-T_us-exc_us,   'red',    '--'),
+                     (-T_us+exc_us,   'red',    '--'),
+                     (-exc_us,        'orange', '--'),
+                     (0,              'grey',   ':')]:
+        ax.axvline(x, color=c, linestyle=ls, linewidth=1.0)
+
+    ax.set_xlabel(r'$t_{\gamma} - t_{\beta_0}$  (µs)')
+    ax.set_ylabel('Counts per bin')
+    ax.set_title(f'SESAM time spectrum{" — " + label if label else ""}  '
+                 f'[T = {T_us:.0f} µs, guard = {exc_us*1e3:.0f} ns]')
+    ax.legend(fontsize=8, loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
+    return counts, edges
+
+
 def autoDetectDelayBounds(dfB, dfG, window=3e-6, bin_width=2e-9,
                            energyBoundsG=None, n_sigma=2.0, plot=True, label="β–γ"):
     """
@@ -164,7 +247,7 @@ def autoDetectDelayBounds(dfB, dfG, window=3e-6, bin_width=2e-9,
     if not dt_list:
         raise RuntimeError("autoDetectDelayBounds: no coincidences found within the search window.")
 
-    dt = np.concatenate(dt_list)
+    dt = np.concatenate(dt_list)           # raw dt values in seconds — kept for median
     bins   = np.arange(-window, window + bin_width, bin_width)
     counts, edges = np.histogram(dt, bins=bins)
     centers_ns = (edges[:-1] + edges[1:]) / 2 * 1e9  # convert to ns
@@ -181,33 +264,40 @@ def autoDetectDelayBounds(dfB, dfG, window=3e-6, bin_width=2e-9,
     kernel = np.ones(smooth_bins) / smooth_bins
     counts_smooth = np.convolve(counts, kernel, mode="same")
 
-    # Find peak
-    peak_idx = int(np.argmax(counts_smooth))
-    peak_ns  = centers_ns[peak_idx]
+    # Rough peak location via argmax (biased by tails — used only for walking)
+    rough_idx = int(np.argmax(counts_smooth))
 
-    if counts_smooth[peak_idx] <= threshold:
+    if counts_smooth[rough_idx] <= threshold:
         raise RuntimeError(
-            f"autoDetectDelayBounds: peak ({counts_smooth[peak_idx]:.0f}) is not above "
+            f"autoDetectDelayBounds: peak ({counts_smooth[rough_idx]:.0f}) is not above "
             f"the detection threshold ({threshold:.0f}). Check the search window or energy ROI."
         )
 
-    # Walk left from peak to find lower bound
-    left_idx = peak_idx
+    # Walk left from rough peak to find lower bound
+    left_idx = rough_idx
     while left_idx > 0 and counts_smooth[left_idx] > threshold:
         left_idx -= 1
 
-    # Walk right from peak to find upper bound
-    right_idx = peak_idx
+    # Walk right from rough peak to find upper bound
+    right_idx = rough_idx
     while right_idx < len(counts_smooth) - 1 and counts_smooth[right_idx] > threshold:
         right_idx += 1
 
     lower_ns = centers_ns[left_idx]
     upper_ns = centers_ns[right_idx]
 
+    # Robust delay estimator: median of raw dt values inside the detected bounds.
+    # The median is insensitive to the right tail that biases the argmax and the
+    # midpoint-of-bounds estimators.
+    dt_in_peak = dt[(dt * 1e9 >= lower_ns) & (dt * 1e9 <= upper_ns)]
+    peak_ns = float(np.median(dt_in_peak) * 1e9) if len(dt_in_peak) > 0 \
+              else centers_ns[rough_idx]
+
     print(f"\nauto-detected delay bounds: [{lower_ns:.1f}, {upper_ns:.1f}] ns")
-    print(f"  peak position : {peak_ns:.1f} ns")
-    print(f"  window width  : {upper_ns - lower_ns:.1f} ns")
-    print(f"  background    : {background:.1f} ± {background_std:.1f} counts/bin")
+    print(f"  delay estimator (median) : {peak_ns:.1f} ns")
+    print(f"  rough peak (argmax)      : {centers_ns[rough_idx]:.1f} ns")
+    print(f"  window width             : {upper_ns - lower_ns:.1f} ns")
+    print(f"  background               : {background:.1f} ± {background_std:.1f} counts/bin")
 
     if plot:
         fig, ax = plt.subplots(figsize=(10, 5))
@@ -217,6 +307,7 @@ def autoDetectDelayBounds(dfB, dfG, window=3e-6, bin_width=2e-9,
         ax.axhline(threshold,  color="purple", linestyle="--", linewidth=1.0, label=f"threshold ({n_sigma}σ) = {threshold:.0f}")
         ax.axvline(lower_ns, color="red",   linestyle="--", linewidth=1.2, label=f"lower = {lower_ns:.1f} ns")
         ax.axvline(upper_ns, color="green", linestyle="--", linewidth=1.2, label=f"upper = {upper_ns:.1f} ns")
+        ax.axvline(peak_ns,  color="blue",  linestyle="-",  linewidth=1.5, label=f"median delay = {peak_ns:.1f} ns")
         ax.axvspan(lower_ns, upper_ns, alpha=0.12, color="yellow", label="auto ROI")
         ax.set_xlabel(r"$t_{\beta} - t_{\gamma}$ (ns)")
         ax.set_ylabel("Counts")
