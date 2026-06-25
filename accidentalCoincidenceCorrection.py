@@ -198,6 +198,97 @@ def sesam_process(t_beta_accepted, t_gamma_roi, T_dead, duration,
     }
 
 
+def correlation_process(t_beta, t_gamma, T_interval, duration):
+    """
+    Correlation counting for absolute activity — Lewis, Smith & Williams (1973),
+    Metrologia 9, 14-20, Case 2 (prompt beta-gamma, separate detectors).
+
+    The measurement is divided into N = floor(duration / T_interval) equal intervals.
+    For each interval i, beta (p_i) and gamma (d_i) events are counted.
+    The cross-covariance is
+
+        X = 1/(N-1) × [ Σ p_i d_i − (Σp_i)(Σd_i)/N ]
+
+    With E[X] = c = ε_β × ε_γ × N₀ × T_interval and the mean counts per interval
+    p̄ = ε_β × N₀ × T_interval,  d̄ = ε_γ × N₀ × T_interval, the activity is
+
+        N₀ = p̄ × d̄ / (X × T_interval)
+
+    identical in form to the B-G coincidence formula  N₀ = R_β × R_γ / R_BG.
+
+    The statistical uncertainty follows Eq. (7) of Lewis 1973:
+        σ²_X ≈ (p̄ × d̄ + X² + X) / N
+
+    Parameters
+    ----------
+    t_beta     : sorted 1-D array of beta timestamps (s)
+    t_gamma    : sorted 1-D array of gamma timestamps in energy ROI (s)
+    T_interval : length of each counting interval (s)
+    duration   : total measurement duration (s)
+
+    Returns
+    -------
+    dict : N_intervals, p_mean, d_mean, X, u_X, eps_beta, u_eps_beta,
+           Activity, u_Activity
+    """
+    if len(t_beta) == 0 or len(t_gamma) == 0 or T_interval <= 0:
+        return {"Activity": 0.0, "u_Activity": 0.0,
+                "eps_beta": 0.0, "u_eps_beta": 0.0, "X": 0.0, "u_X": 0.0,
+                "N_intervals": 0, "p_mean": 0.0, "d_mean": 0.0}
+
+    t_start = min(t_beta[0], t_gamma[0])
+    N = int(duration / T_interval)
+    if N < 3:
+        raise RuntimeError(
+            f"correlation_process: only {N} intervals — increase duration or reduce T_interval.")
+
+    # Assign each event to its interval index via floor division
+    p_idx = ((t_beta  - t_start) / T_interval).astype(int)
+    d_idx = ((t_gamma - t_start) / T_interval).astype(int)
+
+    # Keep only events that fall within [0, N)
+    p = np.bincount(p_idx[(p_idx >= 0) & (p_idx < N)], minlength=N).astype(float)
+    d = np.bincount(d_idx[(d_idx >= 0) & (d_idx < N)], minlength=N).astype(float)
+
+    p_mean = p.mean()
+    d_mean = d.mean()
+
+    # Cross-covariance  (sample, ddof=1)
+    X = (np.dot(p, d) - N * p_mean * d_mean) / (N - 1)
+
+    # Uncertainty  σ²_X ≈ (p̄ d̄ + X² + X) / N  [Lewis 1973, Eq. 7]
+    u_X = np.sqrt(max(p_mean * d_mean + X ** 2 + abs(X), 0.0) / N)
+
+    # Activity
+    if X > 0:
+        N0    = p_mean * d_mean / (X * T_interval)
+        u_N0  = N0 * np.sqrt(1.0 / (N * max(p_mean, 1e-12))
+                             + 1.0 / (N * max(d_mean, 1e-12))
+                             + (u_X / X) ** 2)
+    else:
+        N0 = u_N0 = 0.0
+
+    # Beta efficiency  ε_β = X / d̄
+    if d_mean > 0 and X > 0:
+        eps_beta   = X / d_mean
+        u_eps_beta = eps_beta * np.sqrt((u_X / X) ** 2 + 1.0 / (N * d_mean))
+    else:
+        eps_beta = u_eps_beta = 0.0
+
+    return {
+        "N_intervals": N,
+        "T_interval":  T_interval,
+        "p_mean":      p_mean,
+        "d_mean":      d_mean,
+        "X":           X,
+        "u_X":         u_X,
+        "eps_beta":    eps_beta,
+        "u_eps_beta":  u_eps_beta,
+        "Activity":    N0,
+        "u_Activity":  u_N0,
+    }
+
+
 def process_anticoincidence_activity(N_beta, N_gamma, N_c_raw, N_c_acc, duration):
     """
     Evaluates activity using the Anticoincidence method and Shift-correction.

@@ -161,6 +161,13 @@ if bg_active:
     sesam_eps_D, sesam_act_D, sesam_u_act_D = [], [], []
     sesam_eps_T, sesam_act_T, sesam_u_act_T = [], [], []
 
+    # --- Correlation counting setup (Lewis et al. 1973) ---
+    T_interval_corr = float(config["settings"]["corr_interval_length"]) * 1e-3  # ms → s
+    corr_eps_D, corr_act_D, corr_u_act_D = [], [], []
+    corr_eps_T, corr_act_T, corr_u_act_T = [], [], []
+    print(f"\nCorrelation counting: T_interval = {T_interval_corr*1e3:.1f} ms  "
+          f"(N_intervals ≈ {int(duration/T_interval_corr)})")
+
     print(f"\nSESAM: T_dead = {T_dead_sesam*1e6:.0f} µs, "
           f"guard = {coinc_exclusion_sesam*1e9:.0f} ns each side, "
           f"zone width = {(T_dead_sesam - 2*coinc_exclusion_sesam)*1e6:.4f} µs")
@@ -259,6 +266,26 @@ if bg_active:
         print(f"  SESAM N_g / N_G        (T) = {sesam_res_T['N_g']} / {sesam_res_T['N_G']}")
         print(f"  SESAM efficiency ε_β   (T) = {sesam_res_T['eps_beta']:.6f} +/- {sesam_res_T['u_eps_beta']:.6f}")
         print(f"  SESAM activity N₀      (T) = {sesam_res_T['Activity']:.4f} +/- {sesam_res_T['u_Activity']:.4f} Bq")
+
+        # ---------------------------------------------------------
+        # D. CORRELATION COUNTING  (Lewis et al. 1973)
+        # ---------------------------------------------------------
+        corr_res_D = acc.correlation_process(t_beta_D, t_gamma, T_interval_corr, duration)
+        corr_res_T = acc.correlation_process(t_beta_T, t_gamma, T_interval_corr, duration)
+
+        corr_eps_D.append(corr_res_D["eps_beta"])
+        corr_act_D.append(corr_res_D["Activity"])
+        corr_u_act_D.append(corr_res_D["u_Activity"])
+        corr_eps_T.append(corr_res_T["eps_beta"])
+        corr_act_T.append(corr_res_T["Activity"])
+        corr_u_act_T.append(corr_res_T["u_Activity"])
+
+        print(f"  Correlation  X (covar) (D) = {corr_res_D['X']:.4f} +/- {corr_res_D['u_X']:.4f}")
+        print(f"  Correlation  ε_β       (D) = {corr_res_D['eps_beta']:.6f} +/- {corr_res_D['u_eps_beta']:.6f}")
+        print(f"  Correlation  N₀        (D) = {corr_res_D['Activity']:.4f} +/- {corr_res_D['u_Activity']:.4f} Bq")
+        print(f"  Correlation  X (covar) (T) = {corr_res_T['X']:.4f} +/- {corr_res_T['u_X']:.4f}")
+        print(f"  Correlation  ε_β       (T) = {corr_res_T['eps_beta']:.6f} +/- {corr_res_T['u_eps_beta']:.6f}")
+        print(f"  Correlation  N₀        (T) = {corr_res_T['Activity']:.4f} +/- {corr_res_T['u_Activity']:.4f} Bq")
 
     print("**********************************")
     print("activity extrapolation analysis...")
@@ -382,11 +409,15 @@ if bg_active:
     y_anti_T = np.array(anti_act_T)
     
     # Perform linear and polynomial fits (intercept is the last element, [-1])
-    fit_anti_lin_D = np.polyfit(x2_anti_D, y_anti_D, 1)
-    fit_anti_poly_D = np.polyfit(x2_anti_D, y_anti_D, 2)
-    
-    fit_anti_lin_T = np.polyfit(x2_anti_T, y_anti_T, 1)
-    fit_anti_poly_T = np.polyfit(x2_anti_T, y_anti_T, 2)
+    fit_anti_lin_D,  cov_anti_lin_D  = np.polyfit(x2_anti_D, y_anti_D, 1, cov=True)
+    fit_anti_poly_D, cov_anti_poly_D = np.polyfit(x2_anti_D, y_anti_D, 2, cov=True)
+    u_anti_lin_D  = np.sqrt(cov_anti_lin_D[-1, -1])
+    u_anti_poly_D = np.sqrt(cov_anti_poly_D[-1, -1])
+
+    fit_anti_lin_T,  cov_anti_lin_T  = np.polyfit(x2_anti_T, y_anti_T, 1, cov=True)
+    fit_anti_poly_T, cov_anti_poly_T = np.polyfit(x2_anti_T, y_anti_T, 2, cov=True)
+    u_anti_lin_T  = np.sqrt(cov_anti_lin_T[-1, -1])
+    u_anti_poly_T = np.sqrt(cov_anti_poly_T[-1, -1])
     
     # (Your existing prints here...)
     print("\nRESULTS FROM BETA-GAMMA COINCIDENCE")
@@ -475,3 +506,126 @@ if bg_active:
             ax.grid(True, alpha=0.3)
             plt.tight_layout()
             plt.show()
+
+    # =========================================================================
+    # CORRELATION COUNTING EXTRAPOLATION  (Lewis et al. 1973)
+    # =========================================================================
+    print("\n**************************************")
+    print("RESULTS FROM CORRELATION COUNTING (Lewis 1973)")
+    print("**************************************")
+
+    eps_corr_D = np.array(corr_eps_D)
+    eps_corr_T = np.array(corr_eps_T)
+    y_corr_D   = np.array(corr_act_D)
+    y_corr_T   = np.array(corr_act_T)
+    u_corr_D   = np.array(corr_u_act_D)
+    u_corr_T   = np.array(corr_u_act_T)
+
+    x1_corr_D = 1.0 - eps_corr_D;  x2_corr_D = x1_corr_D / eps_corr_D
+    x1_corr_T = 1.0 - eps_corr_T;  x2_corr_T = x1_corr_T / eps_corr_T
+
+    A_cx1_lin_D, uA_cx1_lin_D, A_cx1_poly_D, uA_cx1_poly_D, cl_cx1_D, cp_cx1_D = _sesam_fit(x1_corr_D, y_corr_D)
+    A_cx2_lin_D, uA_cx2_lin_D, A_cx2_poly_D, uA_cx2_poly_D, cl_cx2_D, cp_cx2_D = _sesam_fit(x2_corr_D, y_corr_D)
+    A_cx1_lin_T, uA_cx1_lin_T, A_cx1_poly_T, uA_cx1_poly_T, cl_cx1_T, cp_cx1_T = _sesam_fit(x1_corr_T, y_corr_T)
+    A_cx2_lin_T, uA_cx2_lin_T, A_cx2_poly_T, uA_cx2_poly_T, cl_cx2_T, cp_cx2_T = _sesam_fit(x2_corr_T, y_corr_T)
+
+    print(f"\nActivity (double, lin fit,  1 - epsilon_beta)                = {A_cx1_lin_D:.4f} +/- {uA_cx1_lin_D:.4f} Bq")
+    print(f"Activity (double, poly fit, 1 - epsilon_beta)                = {A_cx1_poly_D:.4f} +/- {uA_cx1_poly_D:.4f} Bq")
+    print(f"Activity (double, lin fit,  (1-epsilon_beta)/epsilon_beta)   = {A_cx2_lin_D:.4f} +/- {uA_cx2_lin_D:.4f} Bq")
+    print(f"Activity (double, poly fit, (1-epsilon_beta)/epsilon_beta)   = {A_cx2_poly_D:.4f} +/- {uA_cx2_poly_D:.4f} Bq")
+    print(f"Activity (triple, lin fit,  1 - epsilon_beta)                = {A_cx1_lin_T:.4f} +/- {uA_cx1_lin_T:.4f} Bq")
+    print(f"Activity (triple, poly fit, 1 - epsilon_beta)                = {A_cx1_poly_T:.4f} +/- {uA_cx1_poly_T:.4f} Bq")
+    print(f"Activity (triple, lin fit,  (1-epsilon_beta)/epsilon_beta)   = {A_cx2_lin_T:.4f} +/- {uA_cx2_lin_T:.4f} Bq")
+    print(f"Activity (triple, poly fit, (1-epsilon_beta)/epsilon_beta)   = {A_cx2_poly_T:.4f} +/- {uA_cx2_poly_T:.4f} Bq")
+
+    for (x1, x2, y_s, u_s,
+         cl1, cp1, a1_lin, ua1_lin, a1_poly,
+         cl2, cp2, a2_lin, ua2_lin, a2_poly, tag) in [
+        (x1_corr_D, x2_corr_D, y_corr_D, u_corr_D,
+         cl_cx1_D, cp_cx1_D, A_cx1_lin_D, uA_cx1_lin_D, A_cx1_poly_D,
+         cl_cx2_D, cp_cx2_D, A_cx2_lin_D, uA_cx2_lin_D, A_cx2_poly_D, "double"),
+        (x1_corr_T, x2_corr_T, y_corr_T, u_corr_T,
+         cl_cx1_T, cp_cx1_T, A_cx1_lin_T, uA_cx1_lin_T, A_cx1_poly_T,
+         cl_cx2_T, cp_cx2_T, A_cx2_lin_T, uA_cx2_lin_T, A_cx2_poly_T, "triple"),
+    ]:
+        for x, cl, cp, a_lin, ua_lin, a_poly, x_lbl in [
+            (x1, cl1, cp1, a1_lin, ua1_lin, a1_poly, r"$1 - \varepsilon_\beta$"),
+            (x2, cl2, cp2, a2_lin, ua2_lin, a2_poly, r"$(1 - \varepsilon_\beta)/\varepsilon_\beta$"),
+        ]:
+            x_fit = np.linspace(0, x.max() * 1.1, 200)
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.errorbar(x, y_s, yerr=u_s, fmt='o', capsize=3, label='data')
+            ax.plot(x_fit, np.polyval(cl, x_fit), '--',
+                    label=f'linear:  A₀ = {a_lin:.2f} ± {ua_lin:.2f} Bq')
+            ax.plot(x_fit, np.polyval(cp, x_fit), ':',
+                    label=f'poly2:   A₀ = {a_poly:.2f} Bq')
+            ax.axvline(0, color='grey', linestyle=':', linewidth=0.8)
+            ax.set_xlabel(x_lbl)
+            ax.set_ylabel('Activity (Bq)')
+            ax.set_title(f'Correlation counting extrapolation — {tag} coincidences')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.show()
+
+    # =========================================================================
+    # ACTIVITY SUMMARY TABLE
+    # =========================================================================
+    W  = 80
+    C1 = 42
+    C2 = 18
+
+    def _v(val, unc):
+        return f"{val:9.2f} ± {unc:7.2f}"
+
+    def _row(label, d_val, d_unc, t_val=None, t_unc=None):
+        dv = _v(d_val, d_unc)
+        tv = _v(t_val, t_unc) if t_val is not None else "      —          "
+        print(f"  {label:<{C1}} {dv:<{C2}} {tv:<{C2}}")
+
+    print("\n" + "=" * W)
+    print(f"{'ACTIVITY SUMMARY':^{W}}")
+    print("=" * W)
+    print(f"  {'Method':<{C1}} {'Double (Bq)':<{C2}} {'Triple (Bq)':<{C2}}")
+    print("-" * W)
+
+    if tdcr_active:
+        print("  TDCR (efficiency calculation):")
+        _row("  singles", activity_beta_S, u_activity_beta_S)
+        _row("  doubles", activity_beta_D, u_activity_beta_D)
+        _row("  triples", activity_beta_T, u_activity_beta_T)
+        print("-" * W)
+
+    print("  beta-gamma Coincidence:")
+    _row("  lin,  1 - eps_beta",
+         *results_bg_D['x1_lin'],   *results_bg_T['x1_lin'])
+    _row("  poly, 1 - eps_beta",
+         *results_bg_D['x1_poly2'], *results_bg_T['x1_poly2'])
+    _row("  lin,  (1-eps_beta)/eps_beta",
+         *results_bg_D['x2_lin'],   *results_bg_T['x2_lin'])
+    _row("  poly, (1-eps_beta)/eps_beta",
+         *results_bg_D['x2_poly2'], *results_bg_T['x2_poly2'])
+    print("-" * W)
+
+    print("  beta-gamma Anti-coincidence (shift method):")
+    _row("  lin,  (1-eps_beta)/eps_beta",
+         fit_anti_lin_D[-1],  u_anti_lin_D,
+         fit_anti_lin_T[-1],  u_anti_lin_T)
+    _row("  poly, (1-eps_beta)/eps_beta",
+         fit_anti_poly_D[-1], u_anti_poly_D,
+         fit_anti_poly_T[-1], u_anti_poly_T)
+    print("-" * W)
+
+    print("  SESAM (selective sampling):")
+    _row("  lin,  1 - eps_beta",          A_x1_lin_D,  uA_x1_lin_D,  A_x1_lin_T,  uA_x1_lin_T)
+    _row("  poly, 1 - eps_beta",          A_x1_poly_D, uA_x1_poly_D, A_x1_poly_T, uA_x1_poly_T)
+    _row("  lin,  (1-eps_beta)/eps_beta", A_x2_lin_D,  uA_x2_lin_D,  A_x2_lin_T,  uA_x2_lin_T)
+    _row("  poly, (1-eps_beta)/eps_beta", A_x2_poly_D, uA_x2_poly_D, A_x2_poly_T, uA_x2_poly_T)
+    print("-" * W)
+
+    print(f"  Correlation counting (Lewis 1973, T={T_interval_corr*1e3:.0f} ms):")
+    _row("  lin,  1 - eps_beta",          A_cx1_lin_D,  uA_cx1_lin_D,  A_cx1_lin_T,  uA_cx1_lin_T)
+    _row("  poly, 1 - eps_beta",          A_cx1_poly_D, uA_cx1_poly_D, A_cx1_poly_T, uA_cx1_poly_T)
+    _row("  lin,  (1-eps_beta)/eps_beta", A_cx2_lin_D,  uA_cx2_lin_D,  A_cx2_lin_T,  uA_cx2_lin_T)
+    _row("  poly, (1-eps_beta)/eps_beta", A_cx2_poly_D, uA_cx2_poly_D, A_cx2_poly_T, uA_cx2_poly_T)
+    print("=" * W)
