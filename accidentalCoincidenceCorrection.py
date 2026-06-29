@@ -115,6 +115,36 @@ def evaluate_listmode_coincidences(t_beta, t_gamma, window_lower, window_upper, 
     return N_gamma, N_c_raw, N_c_acc
 
 
+@njit
+def apply_extended_dead_time(t_sorted, T_dead):
+    """
+    Apply an extended (paralysable) dead time to a sorted timestamp array and
+    return a boolean mask of accepted events.
+
+    For an extended dead time, EVERY arriving event (whether it is accepted or
+    not) resets the dead-time clock.  An event at time t is accepted only if no
+    previous event arrived within the preceding T_dead seconds.
+
+    Parameters
+    ----------
+    t_sorted : 1-D array of event timestamps in ascending order (s)
+    T_dead   : extended dead time (s)
+
+    Returns
+    -------
+    mask : bool array, True where events are accepted
+    """
+    n = len(t_sorted)
+    mask = np.zeros(n, dtype=np.bool_)
+    t_last = -1e18
+    for i in range(n):
+        ti = t_sorted[i]
+        if ti - t_last > T_dead:
+            mask[i] = True
+        t_last = ti          # extended DT: every event resets the clock
+    return mask
+
+
 def _scale_timestamps(t, duration_target, t_start_target):
     """
     Linearly rescale a sorted timestamp array so that it spans

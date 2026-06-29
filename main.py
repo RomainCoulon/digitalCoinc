@@ -160,8 +160,30 @@ if bg_active:
     anti_eps_T, anti_act_T = [], []
 
     # --- SESAM setup ---
-    T_dead_sesam          = com_ext_deadTime_tdcr * 1e-9          # s
+    # T_dead_sesam is independent of the TDCR dead time: it must be >> coincidence
+    # peak width so the gap [t0-T, t0) is free of coincident gammas.
+    T_dead_sesam          = float(config["settings"]["sesam_dead_time_ns"]) * 1e-9  # ns → s
     coinc_exclusion_sesam = float(config["settings"]["sesam_coinc_exclusion"]) * 1e-9  # ns → s
+
+    # Apply SESAM-specific extended dead time to the FULL accepted-beta stream
+    # (df_beta_S) — this is crucial: the dead-time veto must use every beta event,
+    # not just doubles/triples, so the gap is truly free of all beta activity.
+    t_S_sorted = np.sort(df_beta_S["TIMETAG"].values)
+    sesam_gate_mask = acc.apply_extended_dead_time(t_S_sorted, T_dead_sesam)
+    t_sesam_gates = t_S_sorted[sesam_gate_mask]
+
+    # Among the SESAM gates, keep only D or T events (qualified start signals).
+    # TIMETAG values come from integer ps × 1e-12 → exact float64 comparison is safe.
+    t_sesam_gates_set = set(t_sesam_gates.tolist())
+    df_beta_D_sesam = df_beta_D[df_beta_D["TIMETAG"].isin(t_sesam_gates_set)].copy()
+    df_beta_T_sesam = df_beta_T[df_beta_T["TIMETAG"].isin(t_sesam_gates_set)].copy()
+
+    zone_W_sesam = T_dead_sesam - 2.0 * coinc_exclusion_sesam
+    print(f"\nSESAM: T_dead = {T_dead_sesam*1e6:.0f} µs, "
+          f"guard = {coinc_exclusion_sesam*1e6:.2f} µs, "
+          f"zone_W = {zone_W_sesam*1e6:.2f} µs")
+    print(f"  SESAM gates total / D / T = "
+          f"{len(t_sesam_gates)} / {len(df_beta_D_sesam)} / {len(df_beta_T_sesam)}")
 
     sesam_eps_D, sesam_act_D, sesam_u_act_D = [], [], []
     sesam_eps_T, sesam_act_T, sesam_u_act_T = [], [], []
@@ -197,9 +219,9 @@ if bg_active:
 
     print("\n--- SESAM spectrum (double coincidences, threshold = 0) ---")
     sp.sesam_spectrum(
-        df_beta_D["TIMETAG"].values, t_gamma,
-        T_dead=T_dead_sesam, bin_width=500e-9,
-        coinc_exclusion=coinc_exclusion_sesam, label="double β"
+        df_beta_D_sesam["TIMETAG"].values, t_gamma,
+        T_dead=T_dead_sesam, bin_width=1000e-9,
+        coinc_exclusion=coinc_exclusion_sesam, label="double β (SESAM gates)"
     )
 
     threshold_beta_vector = [0, 500, 1000, 2000, 3000]
@@ -269,11 +291,16 @@ if bg_active:
 
         # ---------------------------------------------------------
         # C. SESAM (Selective Sampling — Müller 1981)
+        # Use SESAM-specific accepted betas (from the larger T_dead_sesam dead time
+        # applied to the full df_beta_S stream) filtered by current threshold.
         # ---------------------------------------------------------
+        t_beta_D_sesam_thr = df_beta_D_sesam[df_beta_D_sesam['ENERGY'] > thres_i]["TIMETAG"].values
+        t_beta_T_sesam_thr = df_beta_T_sesam[df_beta_T_sesam['ENERGY'] > thres_i]["TIMETAG"].values
+
         sesam_res_D = acc.sesam_process(
-            t_beta_D, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
+            t_beta_D_sesam_thr, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
         sesam_res_T = acc.sesam_process(
-            t_beta_T, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
+            t_beta_T_sesam_thr, t_gamma, T_dead_sesam, duration, coinc_exclusion_sesam)
 
         sesam_eps_D.append(sesam_res_D["eps_beta"])
         sesam_act_D.append(sesam_res_D["Activity"])
